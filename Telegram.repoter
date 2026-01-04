@@ -1,0 +1,89 @@
+continue
+            
+            result = await self.report_single(chat_id, reason)
+            results.append(result)
+            
+            status = "✅" if result["success"] else "❌"
+            log.info(f"{status} [{i}/{len(links)}] {result.get('bot', 'N/A')} | {chat_id[:25]}...")
+            
+            await asyncio.sleep(delay + random.uniform(0, 0.5))
+        
+        return results
+
+# Global reporter instance
+reporter = MassReporter()
+app = FastAPI(title="Telegram Mass Reporter")
+
+@app.on_event("startup")
+async def startup():
+    await reporter.start()
+
+@app.on_event("shutdown") 
+async def shutdown():
+    await reporter.stop()
+
+@app.get("/")
+async def root():
+    total_reports = sum(s["total"] for s in reporter.stats.values())
+    total_success = sum(s["success"] for s in reporter.stats.values())
+    rate = (total_success/total_reports*100) if total_reports else 0
+    
+    return {
+        "status": "🚀 ACTIVE",
+        "bots": len(reporter.tokens),
+        "total_reports": total_reports,
+        "success_rate": f"{rate:.1f}%",
+        "stats": dict(reporter.stats)
+    }
+
+@app.post("/report")
+async def single_report(link: str = Form(...), reason: str = Form("spam")):
+    if not reporter.running:
+        raise HTTPException(503, "Reporter not ready")
+    
+    chat_id = reporter.extract_chat(link)
+    if not chat_id:
+        raise HTTPException(400, "Invalid Telegram link")
+    
+    result = await reporter.report_single(chat_id, reason)
+    return result
+
+@app.post("/mass")
+async def mass_report(links: str = Form(...), reason: str = Form("spam"), delay: float = Form(1.0)):
+    if not reporter.running:
+        raise HTTPException(503, "Reporter not ready")
+    
+    try:
+        link_list = [{"link": l.strip(), "reason": reason} for l in links.splitlines() if l.strip()]
+        if not link_list:
+            raise HTTPException(400, "No valid links")
+        
+        results = await reporter.mass_report(link_list, delay)
+        success_count = sum(1 for r in results if r["success"])
+        
+        return {
+            "success": True,
+            "total": len(results),
+            "successful": success_count,
+            "rate": f"{success_count/len(results)*100:.1f}%",
+            "results": results
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/stats")
+async def stats():
+    total_reports = sum(s["total"] for s in reporter.stats.values())
+    total_success = sum(s["success"] for s in reporter.stats.values())
+    uptime = time.time() - uvicorn.server.server_state.startup_time if hasattr(uvicorn.server.server_state, 'startup_time') else 0
+    return {
+        "bots": len(reporter.tokens),
+        "total_reports": total_reports,
+        "success": total_success,
+        "success_rate": f"{total_success/total_reports*100:.1f}%" if total_reports else "0%",
+        "uptime_minutes": round(uptime/60, 1),
+        "per_bot": dict(reporter.stats)
+    }
+
+if name == "main":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
